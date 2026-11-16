@@ -1,0 +1,142 @@
+# Unzips every assignment in the repo and publishes it to GitHub Pages,
+# with a homepage linking to each one. Runs on every push to main.
+name: Publish assignments
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Unzip assignments and build homepage
+        run: |
+          python3 - . _site <<'PY'
+          import html, os, re, shutil, sys, tempfile, zipfile
+          from pathlib import Path
+
+          src = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+          out = Path(sys.argv[2] if len(sys.argv) > 2 else "_site").resolve()
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+
+          DRIVE_SUFFIX = re.compile(r"-\d{8}T\d{6}Z-\d+-\d+$")
+
+          def slug(name):
+              s = re.sub(r"\s*\+\s*", "-", name)
+              s = re.sub(r"\s+", "-", s)
+              return re.sub(r"-{2,}", "-", s)
+
+          def natkey(s):
+              return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+          entries = {}  # display name -> path relative to out
+
+          for item in sorted(src.iterdir()):
+              if item.name.startswith(".") or item.name.startswith("_") or item.resolve() == out:
+                  continue
+              if item.suffix.lower() == ".zip":
+                  with tempfile.TemporaryDirectory() as tmp:
+                      with zipfile.ZipFile(item) as z:
+                          z.extractall(tmp)
+                      top = [p for p in Path(tmp).iterdir() if not p.name.startswith("__MACOSX")]
+                      if len(top) == 1 and top[0].is_dir():
+                          display, root = top[0].name, top[0]
+                      else:
+                          display, root = DRIVE_SUFFIX.sub("", item.stem), Path(tmp)
+                      dest = out / slug(display)
+                      shutil.copytree(root, dest, dirs_exist_ok=True,
+                                      ignore=shutil.ignore_patterns("__MACOSX", ".DS_Store"))
+                      entries[display] = dest
+              elif item.is_dir():
+                  dest = out / slug(item.name)
+                  shutil.copytree(item, dest, dirs_exist_ok=True)
+                  entries[item.name] = dest
+              elif item.is_file():
+                  dest = out / slug(item.name)
+                  shutil.copy2(item, dest)
+                  entries[item.stem] = dest
+
+          def page_title(p):
+              try:
+                  m = re.search(r"<title>(.*?)</title>", p.read_text(errors="ignore"), re.I | re.S)
+                  return html.unescape(m.group(1).strip()) if m and m.group(1).strip() else None
+              except Exception:
+                  return None
+
+          KIND = {".pdf": "PDF", ".docx": "Word doc", ".doc": "Word doc", ".json": "JSON",
+                  ".pptx": "Slides", ".xlsx": "Spreadsheet"}
+
+          cards = []
+          for display in sorted(entries, key=lambda d: ('final' in d.lower(), natkey(slug(d)))):
+              path = entries[display]
+              files = [path] if path.is_file() else sorted(
+                  (f for f in path.rglob("*") if f.is_file()), key=lambda f: natkey(str(f)))
+              links = []
+              for f in files:
+                  ext = f.suffix.lower()
+                  rel = f.relative_to(out).as_posix()
+                  href = "/".join(map(lambda s: s.replace(" ", "%20").replace("#", "%23"), rel.split("/")))
+                  if ext in (".html", ".htm"):
+                      label = page_title(f) or f.stem.replace("-", " ")
+                      links.append((0, f'<a class="live" href="{href}">{html.escape(label)}<span>Open page</span></a>'))
+                  elif ext in KIND:
+                      links.append((1, f'<a class="file" href="{href}">{html.escape(f.name)}<span>{KIND[ext]}</span></a>'))
+              if not links:
+                  continue
+              links.sort(key=lambda x: x[0])
+              name = display.replace("-", " ")
+              cards.append(f'<section><h2>{html.escape(name)}</h2>{"".join(l for _, l in links)}</section>')
+
+          (out / ".nojekyll").write_text("")
+          (out / "index.html").write_text(f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Information and Web Programming</title>
+          <style>
+          :root{{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#5d6470;--line:#e3e6eb;--accent:#8a1538}}
+          @media (prefers-color-scheme:dark){{:root{{--bg:#111317;--card:#1a1d22;--ink:#eceef2;--muted:#9aa1ad;--line:#2a2e35;--accent:#e0577d}}}}
+          *{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}}
+          main{{max-width:760px;margin:0 auto;padding:48px 20px 64px}}
+          header{{margin-bottom:32px}}h1{{font-size:clamp(1.6rem,4vw,2.2rem);margin:0 0 6px;letter-spacing:-.02em}}
+          header p{{margin:0;color:var(--muted)}}
+          .grid{{display:grid;gap:14px}}
+          section{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}}
+          h2{{font-size:1.05rem;margin:0 0 10px}}
+          a{{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;margin-top:6px;border-radius:8px;text-decoration:none;color:var(--ink);border:1px solid var(--line)}}
+          a:hover{{border-color:var(--accent)}}
+          a span{{font-size:.8rem;color:var(--muted);white-space:nowrap}}
+          a.live span{{color:var(--accent);font-weight:600}}
+          </style></head><body><main>
+          <header><h1>Information and Web Programming</h1><p>Jose Caban · Fordham University · Fall 2026</p></header>
+          <div class="grid">{"".join(cards)}</div>
+          </main></body></html>
+          """)
+          print(f"Built {len(cards)} sections into {out}")
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
